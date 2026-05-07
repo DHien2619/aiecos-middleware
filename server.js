@@ -10,9 +10,11 @@ const DIFY_BASE_URL = process.env.DIFY_BASE_URL;
 const PANCAKE_SESSION_TOKEN = process.env.PANCAKE_SESSION_TOKEN;
 const PANCAKE_PAGE_ID = process.env.PANCAKE_PAGE_ID;
 const PANCAKE_API = 'https://pancake.vn/api/v1';
+const LARK_WEBHOOK_URL = process.env.LARK_WEBHOOK_URL;
 
 // Dify session: pancake_conv_id → dify_conv_id
 const difyConversations = {};
+let leadCounter = 0;
 
 // Track processed message IDs to prevent double-processing
 const processedMessages = new Set();
@@ -24,6 +26,48 @@ app.get('/', (req, res) => res.json({
   mode: 'polling',
   processed: processedMessages.size,
 }));
+
+// API endpoint for Dify to send lead info to Lark
+app.use(express.urlencoded({ extended: true }));
+
+app.post('/api/lead', async (req, res) => {
+  try {
+    const { name, phone, product, region, priority, note } = req.body;
+    if (!name && !phone) {
+      return res.status(400).json({ error: 'Missing name or phone' });
+    }
+    leadCounter++;
+    await sendLeadToLark({ id: leadCounter, name, phone, product, region, priority, note });
+    res.json({ success: true, lead_id: leadCounter });
+  } catch (err) {
+    console.error('[Lead API Error]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function sendLeadToLark({ id, name, phone, product, region, priority, note }) {
+  if (!LARK_WEBHOOK_URL) {
+    console.warn('[Lark] No LARK_WEBHOOK_URL configured');
+    return;
+  }
+
+  const lines = [`LEAD MỚI #${id}`];
+  if (name) lines.push(`Khách: ${name}`);
+  if (phone) lines.push(`SĐT: ${phone}`);
+  if (product) lines.push(`Sản phẩm: ${product}`);
+  if (region) lines.push(`Khu vực: ${region}`);
+  if (priority) lines.push(`Mức độ: ${priority}`);
+  if (note) lines.push(`Ghi chú: ${note}`);
+
+  const text = lines.join('\n');
+
+  await axios.post(LARK_WEBHOOK_URL, {
+    msg_type: 'text',
+    content: { text },
+  }, { timeout: 10000 });
+
+  console.log(`[Lark] Lead #${id} sent: ${name} - ${phone}`);
+}
 
 // Polling: check for new customer messages every 5 seconds
 async function pollPancakeMessages() {
