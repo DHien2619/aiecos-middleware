@@ -103,12 +103,17 @@ async function processConversation(conv) {
 
 async function sendPancakeReply(convId, message) {
   try {
+    const formData = new URLSearchParams();
+    formData.append('action', 'reply_inbox');
+    formData.append('message', message);
+    formData.append('send_by_platform', 'web');
+
     await axios.post(
       `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convId}/messages`,
-      { message, action: 'STANDARD' },
+      formData.toString(),
       {
         params: { access_token: PANCAKE_SESSION_TOKEN },
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         timeout: 10000,
       }
     );
