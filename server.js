@@ -51,6 +51,7 @@ async function pollPancakeMessages() {
       const lastSentByPage = conv.last_sent_by?.id === PANCAKE_PAGE_ID;
 
       if (hasUnread && !lastSentByPage) {
+        console.log('[Poll] Processing conv id:', conv.id, '| from_psid:', conv.from_psid, '| last_sent_by:', conv.last_sent_by?.id);
         await processConversation(conv);
       }
     }
@@ -98,7 +99,7 @@ async function processConversation(conv) {
     // Send reply to Pancake
     await sendPancakeReply(convIdForApi, answer);
   } catch (err) {
-    console.error('[Process Error]', err.response?.data || err.message);
+    console.error('[Process Error]', JSON.stringify(err.response?.data) || err.message, '| convIdForApi:', convIdForApi, '| psid:', customerPsid);
   }
 }
 
