@@ -62,19 +62,17 @@ async function pollPancakeMessages() {
 
 async function processConversation(conv) {
   const convId = conv.id;
-  // Pancake conv IDs are sometimes "{pageId}_{threadId}" — strip the page prefix for API calls
-  const convIdForApi = String(convId).includes('_') ? String(convId).split('_').slice(1).join('_') : convId;
+  const convIdForApi = convId; // use full conv ID as returned by Pancake
   const customerPsid = String(conv.from_psid || conv.from?.id || '');
 
   try {
     // Get last message from customer
-    const msgRes = await axios.get(
-      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convIdForApi}/messages`,
-      {
-        params: { access_token: PANCAKE_SESSION_TOKEN, from_id: customerPsid },
-        timeout: 10000,
-      }
-    );
+    const msgUrl = `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convIdForApi}/messages`;
+    console.log('[Fetch] URL:', msgUrl, '| from_id:', customerPsid);
+    const msgRes = await axios.get(msgUrl, {
+      params: { access_token: PANCAKE_SESSION_TOKEN, from_id: customerPsid },
+      timeout: 10000,
+    });
 
     const msgId = msgRes.data.id;
     const messageText = msgRes.data.message;
