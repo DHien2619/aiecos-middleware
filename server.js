@@ -61,12 +61,14 @@ async function pollPancakeMessages() {
 
 async function processConversation(conv) {
   const convId = conv.id;
+  // Pancake conv IDs are sometimes "{pageId}_{threadId}" — strip the page prefix for API calls
+  const convIdForApi = String(convId).includes('_') ? String(convId).split('_').slice(1).join('_') : convId;
   const customerPsid = String(conv.from_psid || conv.from?.id || '');
 
   try {
     // Get last message from customer
     const msgRes = await axios.get(
-      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convId}/messages`,
+      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convIdForApi}/messages`,
       {
         params: { access_token: PANCAKE_SESSION_TOKEN, from_id: customerPsid },
         timeout: 10000,
@@ -80,21 +82,21 @@ async function processConversation(conv) {
     if (processedMessages.has(msgId)) return;
 
     processedMessages.add(msgId);
-    console.log(`[New Message] Conv: ${convId} | Text: ${messageText}`);
+    console.log(`[New Message] Conv: ${convIdForApi} | Text: ${messageText}`);
 
     // Call Dify Agent
-    const difyConvId = difyConversations[convId] || '';
+    const difyConvId = difyConversations[convIdForApi] || '';
     const { answer, newDifyConvId } = await callDifyStreaming({
       query: messageText,
       conversationId: difyConvId,
-      user: customerPsid || convId,
+      user: customerPsid || convIdForApi,
     });
-    difyConversations[convId] = newDifyConvId;
+    difyConversations[convIdForApi] = newDifyConvId;
 
     console.log(`[Dify Reply] ${answer}`);
 
     // Send reply to Pancake
-    await sendPancakeReply(convId, answer);
+    await sendPancakeReply(convIdForApi, answer);
   } catch (err) {
     console.error('[Process Error]', err.response?.data || err.message);
   }
