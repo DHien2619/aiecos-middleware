@@ -7,99 +7,171 @@ app.use(express.json());
 
 const DIFY_API_KEY = process.env.DIFY_API_KEY;
 const DIFY_BASE_URL = process.env.DIFY_BASE_URL;
-const PANCAKE_API_KEY = process.env.PANCAKE_API_KEY;
+const PANCAKE_SESSION_TOKEN = process.env.PANCAKE_SESSION_TOKEN;
+const PANCAKE_PAGE_ID = process.env.PANCAKE_PAGE_ID;
+const PANCAKE_API = 'https://pancake.vn/api/v1';
 
-// Lưu mapping: pancake_conv_id → dify_conv_id (dùng RAM, đủ cho demo)
-const sessions = {};
+// Dify session: pancake_conv_id → dify_conv_id
+const difyConversations = {};
+
+// Track processed message IDs to prevent double-processing
+const processedMessages = new Set();
 
 // Health check
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Aiecos AI Middleware' }));
+app.get('/', (req, res) => res.json({
+  status: 'ok',
+  service: 'Aiecos AI Middleware',
+  mode: 'polling',
+  processed: processedMessages.size,
+}));
 
-// Pancake gửi webhook vào đây khi có tin nhắn mới từ khách
-app.post('/webhook/pancake', async (req, res) => {
-  // Trả 200 ngay để Pancake không timeout
-  res.sendStatus(200);
+// Polling: check for new customer messages every 5 seconds
+async function pollPancakeMessages() {
+  if (!PANCAKE_SESSION_TOKEN || !PANCAKE_PAGE_ID) {
+    console.error('[Config] Missing PANCAKE_SESSION_TOKEN or PANCAKE_PAGE_ID');
+    return;
+  }
 
   try {
-    const body = req.body;
-    console.log('[Pancake Webhook]', JSON.stringify(body, null, 2));
-
-    // Pancake webhook payload
-    const conversationId = body.conversation_id || body.id;
-    const messageText =
-      body.messages?.[0]?.message ||
-      body.message?.text ||
-      body.text;
-    const senderId = String(
-      body.customer?.uid || body.customer?.id || body.sender?.id || conversationId
-    );
-
-    if (!messageText || !conversationId) {
-      console.log('[Skip] Không có message hoặc conversation_id');
-      return;
-    }
-
-    // Bỏ qua tin nhắn do page gửi (tránh vòng lặp)
-    if (body.is_page_message || body.from_page) {
-      console.log('[Skip] Tin nhắn từ page, bỏ qua');
-      return;
-    }
-
-    console.log(`[Message] Conv: ${conversationId} | User: ${senderId} | Text: ${messageText}`);
-
-    // Lấy Dify conversation_id cũ nếu có
-    const difyConvId = sessions[conversationId] || '';
-
-    // Gọi Dify Agent
-    const difyRes = await axios.post(
-      `${DIFY_BASE_URL}/chat-messages`,
-      {
-        inputs: {},
-        query: messageText,
-        response_mode: 'blocking',
-        conversation_id: difyConvId,
-        user: senderId,
+    const res = await axios.get(`${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations`, {
+      params: {
+        access_token: PANCAKE_SESSION_TOKEN,
+        unread_first: true,
+        mode: 'NONE',
+        cursor_mode: true,
+        from_platform: 'web',
       },
+      timeout: 10000,
+    });
+
+    const conversations = res.data.conversations || [];
+
+    for (const conv of conversations) {
+      const hasUnread = (conv.unread_count || 0) > 0;
+      const lastSentByPage = conv.last_sent_by?.id === PANCAKE_PAGE_ID;
+
+      if (hasUnread && !lastSentByPage) {
+        await processConversation(conv);
+      }
+    }
+  } catch (err) {
+    console.error('[Poll Error]', err.message);
+  }
+}
+
+async function processConversation(conv) {
+  const convId = conv.id;
+  const customerPsid = String(conv.from_psid || conv.from?.id || '');
+
+  try {
+    // Get last message from customer
+    const msgRes = await axios.get(
+      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convId}/messages`,
       {
-        headers: {
-          Authorization: `Bearer ${DIFY_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
+        params: { access_token: PANCAKE_SESSION_TOKEN, from_id: customerPsid },
+        timeout: 10000,
       }
     );
 
-    const { answer, conversation_id: newDifyConvId } = difyRes.data;
-    sessions[conversationId] = newDifyConvId;
+    const msgId = msgRes.data.id;
+    const messageText = msgRes.data.message;
+
+    if (!messageText || !msgId) return;
+    if (processedMessages.has(msgId)) return;
+
+    processedMessages.add(msgId);
+    console.log(`[New Message] Conv: ${convId} | Text: ${messageText}`);
+
+    // Call Dify Agent
+    const difyConvId = difyConversations[convId] || '';
+    const { answer, newDifyConvId } = await callDifyStreaming({
+      query: messageText,
+      conversationId: difyConvId,
+      user: customerPsid || convId,
+    });
+    difyConversations[convId] = newDifyConvId;
 
     console.log(`[Dify Reply] ${answer}`);
 
-    // Gửi reply về Pancake
-    await sendPancakeReply(conversationId, answer);
+    // Send reply to Pancake
+    await sendPancakeReply(convId, answer);
   } catch (err) {
-    console.error('[Error]', err.response?.data || err.message);
+    console.error('[Process Error]', err.response?.data || err.message);
   }
-});
+}
 
-async function sendPancakeReply(conversationId, message) {
+async function sendPancakeReply(convId, message) {
   try {
     await axios.post(
-      `https://pages.fm/api/v1/conversations/${conversationId}/messages`,
-      { message },
+      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convId}/messages`,
+      { message, action: 'STANDARD' },
       {
-        headers: {
-          Authorization: `Bearer ${PANCAKE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
+        params: { access_token: PANCAKE_SESSION_TOKEN },
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000,
       }
     );
-    console.log('[Pancake] Đã gửi reply thành công');
+    console.log('[Pancake] Reply sent successfully');
   } catch (err) {
     console.error('[Pancake Reply Error]', err.response?.data || err.message);
   }
 }
 
+async function callDifyStreaming({ query, conversationId, user }) {
+  const response = await axios.post(
+    `${DIFY_BASE_URL}/chat-messages`,
+    {
+      inputs: {},
+      query,
+      response_mode: 'streaming',
+      conversation_id: conversationId,
+      user,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${DIFY_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      responseType: 'stream',
+      timeout: 60000,
+    }
+  );
+
+  return new Promise((resolve, reject) => {
+    let answer = '';
+    let newDifyConvId = conversationId;
+    let buffer = '';
+
+    response.data.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr || jsonStr === '[DONE]') continue;
+        try {
+          const event = JSON.parse(jsonStr);
+          if (event.event === 'agent_message' || event.event === 'message') {
+            answer += event.answer || '';
+          }
+          if (event.event === 'message_end') {
+            newDifyConvId = event.conversation_id || newDifyConvId;
+          }
+        } catch (_) {}
+      }
+    });
+
+    response.data.on('end', () => resolve({ answer: answer.trim(), newDifyConvId }));
+    response.data.on('error', reject);
+  });
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Aiecos Middleware running on port ${PORT}`);
+  console.log(`✅ Aiecos Middleware running on port ${PORT} (polling mode)`);
+  // Start polling immediately then every 5 seconds
+  pollPancakeMessages();
+  setInterval(pollPancakeMessages, 5000);
 });
