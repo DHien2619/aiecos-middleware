@@ -116,12 +116,29 @@ async function pollPancakeMessages() {
   }
 }
 
+// Lấy SĐT đã biết của khách từ Pancake customer profile
+async function getKnownPhone(customerUuid) {
+  try {
+    const r = await axios.get(
+      `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/customers/${customerUuid}`,
+      { params: { access_token: PANCAKE_SESSION_TOKEN }, timeout: 10000 }
+    );
+    const phones = r.data?.data?.recent_phone_numbers || [];
+    return phones[0]?.phone_number || '';
+  } catch (err) {
+    console.error('[getKnownPhone Error]', err.message);
+    return '';
+  }
+}
+
 async function processConversation(conv) {
   const convId = conv.id;
   const convIdForApi = convId; // use full conv ID as returned by Pancake
   const customerPsid = String(conv.from_psid || conv.from?.id || '');
   // Lấy tên Facebook của khách từ dữ liệu Pancake
   const customerName = conv.from?.name || conv.customer_name || conv.name || '';
+  // Customer UUID Pancake - persist xuyên conversation
+  const customerUuid = conv.customers?.[0]?.id || '';
 
   // Bỏ qua nếu conversation này đang được xử lý
   if (inFlightConversations.has(convIdForApi)) {
@@ -152,10 +169,23 @@ async function processConversation(conv) {
     const difyConvId = difyConversations[convIdForApi] || '';
     const isNewConversation = !difyConvId;
 
-    // Nếu là tin nhắn đầu tiên của conversation, đính kèm tên FB vào context
-    const queryWithContext = (isNewConversation && customerName)
-      ? `[FB_NAME: ${customerName}]\n${messageText}`
-      : messageText;
+    // Lấy SĐT đã biết của khách từ Pancake customer profile (persist xuyên chat)
+    let knownPhone = '';
+    if (isNewConversation && customerUuid) {
+      knownPhone = await getKnownPhone(customerUuid);
+    }
+
+    // Build context cho Dify
+    let queryWithContext = messageText;
+    if (isNewConversation) {
+      const contextParts = [];
+      if (customerName) contextParts.push(`FB_NAME: ${customerName}`);
+      if (knownPhone) contextParts.push(`KNOWN_PHONE: ${knownPhone}`);
+      if (contextParts.length > 0) {
+        queryWithContext = `[${contextParts.join(' | ')}]\n${messageText}`;
+      }
+    }
+    console.log(`[Context] knownPhone: ${knownPhone || 'none'} | query prefix: ${queryWithContext.split('\\n')[0].slice(0, 100)}`);
 
     const { answer, newDifyConvId } = await callDifyStreaming({
       query: queryWithContext,
