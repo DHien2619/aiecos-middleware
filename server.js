@@ -108,11 +108,13 @@ async function processConversation(conv) {
   const convId = conv.id;
   const convIdForApi = convId; // use full conv ID as returned by Pancake
   const customerPsid = String(conv.from_psid || conv.from?.id || '');
+  // Lấy tên Facebook của khách từ dữ liệu Pancake
+  const customerName = conv.from?.name || conv.customer_name || conv.name || '';
 
   try {
     // Get last message from customer
     const msgUrl = `${PANCAKE_API}/pages/${PANCAKE_PAGE_ID}/conversations/${convIdForApi}/messages`;
-    console.log('[Fetch] URL:', msgUrl, '| from_id:', customerPsid);
+    console.log('[Fetch] URL:', msgUrl, '| from_id:', customerPsid, '| name:', customerName);
     const msgRes = await axios.get(msgUrl, {
       params: { access_token: PANCAKE_SESSION_TOKEN, from_id: customerPsid },
       timeout: 10000,
@@ -125,12 +127,19 @@ async function processConversation(conv) {
     if (processedMessages.has(msgId)) return;
 
     processedMessages.add(msgId);
-    console.log(`[New Message] Conv: ${convIdForApi} | Text: ${messageText}`);
+    console.log(`[New Message] Conv: ${convIdForApi} | Name: ${customerName} | Text: ${messageText}`);
 
     // Call Dify Agent
     const difyConvId = difyConversations[convIdForApi] || '';
+    const isNewConversation = !difyConvId;
+
+    // Nếu là tin nhắn đầu tiên của conversation, đính kèm tên FB vào context
+    const queryWithContext = (isNewConversation && customerName)
+      ? `[FB_NAME: ${customerName}]\n${messageText}`
+      : messageText;
+
     const { answer, newDifyConvId } = await callDifyStreaming({
-      query: messageText,
+      query: queryWithContext,
       conversationId: difyConvId,
       user: customerPsid || convIdForApi,
     });
