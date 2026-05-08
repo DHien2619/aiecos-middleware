@@ -19,6 +19,9 @@ let leadCounter = 0;
 // Track processed message IDs to prevent double-processing
 const processedMessages = new Set();
 
+// Track conversations currently being processed (chống xử lý trùng khi poll fires liên tục)
+const inFlightConversations = new Set();
+
 // Health check
 app.get('/', (req, res) => res.json({
   status: 'ok',
@@ -90,15 +93,24 @@ async function pollPancakeMessages() {
 
     const conversations = res.data.conversations || [];
 
-    for (const conv of conversations) {
+    // Lọc các conversation cần xử lý (có tin nhắn mới chưa trả lời)
+    const pendingConvs = conversations.filter(conv => {
       const hasUnread = (conv.unread_count || 0) > 0;
       const lastSentByPage = conv.last_sent_by?.id === PANCAKE_PAGE_ID;
+      return hasUnread && !lastSentByPage;
+    });
 
-      if (hasUnread && !lastSentByPage) {
-        console.log('[Poll] Processing conv id:', conv.id, '| from_psid:', conv.from_psid, '| last_sent_by:', conv.last_sent_by?.id);
-        await processConversation(conv);
-      }
-    }
+    if (pendingConvs.length === 0) return;
+
+    console.log(`[Poll] Processing ${pendingConvs.length} conversations in parallel`);
+
+    // Xử lý song song tất cả conversation — không chờ nhau
+    await Promise.allSettled(
+      pendingConvs.map(conv => {
+        console.log('[Poll] Queue conv id:', conv.id, '| from_psid:', conv.from_psid);
+        return processConversation(conv);
+      })
+    );
   } catch (err) {
     console.error('[Poll Error]', err.message);
   }
@@ -110,6 +122,13 @@ async function processConversation(conv) {
   const customerPsid = String(conv.from_psid || conv.from?.id || '');
   // Lấy tên Facebook của khách từ dữ liệu Pancake
   const customerName = conv.from?.name || conv.customer_name || conv.name || '';
+
+  // Bỏ qua nếu conversation này đang được xử lý
+  if (inFlightConversations.has(convIdForApi)) {
+    console.log(`[Skip] Conv ${convIdForApi} đang được xử lý, bỏ qua`);
+    return;
+  }
+  inFlightConversations.add(convIdForApi);
 
   try {
     // Get last message from customer
@@ -151,6 +170,8 @@ async function processConversation(conv) {
     await sendPancakeReply(convIdForApi, answer);
   } catch (err) {
     console.error('[Process Error]', JSON.stringify(err.response?.data) || err.message, '| convIdForApi:', convIdForApi, '| psid:', customerPsid);
+  } finally {
+    inFlightConversations.delete(convIdForApi);
   }
 }
 
